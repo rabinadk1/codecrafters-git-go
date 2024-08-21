@@ -12,7 +12,6 @@ import (
 	"strings"
 )
 
-// Usage: your_program.sh <command> <arg1> <arg2> ...
 func main() {
 	if len(os.Args) < 2 {
 		log.Fatalln("usage: mygit <command> [<args>...]")
@@ -118,8 +117,39 @@ func main() {
 			}
 		}
 
+	case "ls-tree":
+		if len(os.Args) != 4 {
+			log.Fatalln("usage: mygit ls-tree --name-only <tree_sha>")
+		}
+
+		sha := os.Args[3]
+		path := fmt.Sprintf(".git/objects/%v/%v", sha[:2], sha[2:])
+
+		compressedReader, err := os.Open(path)
+		if err != nil {
+			log.Fatalf("Error reading file: %s\n", err)
+		}
+		defer compressedReader.Close()
+
+		z, err := zlib.NewReader(compressedReader)
+		if err != nil {
+			log.Fatalf("Error decompressing file: %s\n", err)
+		}
+		defer z.Close()
+
+		p, err := io.ReadAll(z)
+		if err != nil {
+			log.Fatalf("Error reading decompressed reader: %s\n", err)
+		}
+
+		parts := strings.Split(string(p), "\x00")
+
+		for _, part := range parts[1 : len(parts)-1] {
+			spaceParts := strings.Split(part, " ")
+			fmt.Println(spaceParts[len(spaceParts)-1])
+		}
+
 	default:
-		fmt.Fprintf(os.Stderr, "Unknown command %s\n", command)
-		os.Exit(1)
+		log.Fatalf("Unknown command %s\n", command)
 	}
 }
