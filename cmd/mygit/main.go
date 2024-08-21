@@ -231,9 +231,13 @@ func main() {
 
 		parts := strings.Split(string(p), "\x00")
 
-		for _, part := range parts[1 : len(parts)-1] {
-			spaceParts := strings.Split(part, " ")
-			fmt.Println(spaceParts[len(spaceParts)-1])
+		const sep = " "
+		const offset = 26
+		spaceParts := strings.SplitN(parts[1], sep, 2)
+		fmt.Println(spaceParts[1])
+
+		for _, part := range parts[2 : len(parts)-1] {
+			fmt.Println(strings.TrimPrefix(part[offset:], sep))
 		}
 
 	case "write-tree":
