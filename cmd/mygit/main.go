@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 )
 
 func hashObject(filepath string, writeObject bool, printHash bool) []byte {
@@ -24,14 +25,8 @@ func hashObject(filepath string, writeObject bool, printHash bool) []byte {
 
 	content = append(prefix, content...)
 
-	h := sha1.New()
-	if _, err := h.Write(content); err != nil {
-		log.Fatalf("Error hashing file: %s\n", err)
-	}
-
-	hash := h.Sum(nil)
-
-	hexHash := hex.EncodeToString(hash)
+	hash := sha1.Sum(content)
+	hexHash := hex.EncodeToString(hash[:])
 
 	if printHash {
 		fmt.Println(hexHash)
@@ -53,7 +48,7 @@ func hashObject(filepath string, writeObject bool, printHash bool) []byte {
 		}
 	}
 
-	return hash
+	return hash[:]
 }
 
 func writeTree(rootDir string, printHash bool) []byte {
@@ -103,14 +98,8 @@ func writeTree(rootDir string, printHash bool) []byte {
 	size := len(byteContent)
 	byteContent = append([]byte(fmt.Sprintf("tree %d\x00", size)), byteContent...)
 
-	h := sha1.New()
-	if _, err := h.Write(byteContent); err != nil {
-		log.Fatalf("Error hashing file: %s\n", err)
-	}
-
-	hash := h.Sum(nil)
-
-	hexHash := hex.EncodeToString(hash)
+	hash := sha1.Sum(byteContent)
+	hexHash := hex.EncodeToString(hash[:])
 
 	if printHash {
 		fmt.Println(hexHash)
@@ -130,7 +119,7 @@ func writeTree(rootDir string, printHash bool) []byte {
 		log.Fatalf("Error writing file: %s\n", err)
 	}
 
-	return hash
+	return hash[:]
 }
 
 func main() {
@@ -242,6 +231,64 @@ func main() {
 
 	case "write-tree":
 		writeTree(".", true)
+
+	case "commit-tree":
+		if len(os.Args) < 5 {
+			log.Fatalln("usage: mygit commit-tree <tree_sha> [-p <parent_sha>] -m <message>")
+		}
+
+		tree_sha := os.Args[2]
+
+		containsParents := os.Args[3] == "-p"
+
+		var parent_sha string
+		var message string
+		if containsParents {
+			parent_sha = os.Args[4]
+			message = os.Args[6]
+		} else {
+			message = os.Args[4]
+		}
+
+		var buffer bytes.Buffer
+
+		buffer.WriteString(fmt.Sprintf("tree %v\n", tree_sha))
+
+		if containsParents {
+			buffer.WriteString(fmt.Sprintf("parent %v\n", parent_sha))
+		}
+
+		t := time.Now()
+		tname, _ := t.Zone()
+		buffer.WriteString(fmt.Sprintf("author My Git <mygit@mygit> %v %v\n", t.Unix(), tname))
+
+		buffer.WriteString(fmt.Sprintf("committer His Git <hisgit@mygit> %v %v\n\n", t.Unix(), tname))
+
+		buffer.WriteString(message + "\n")
+
+		content := buffer.Bytes()
+
+		size := len(content)
+		content = append([]byte(fmt.Sprintf("commit %d\x00", size)), content...)
+
+		hash := sha1.Sum(content)
+		hexHash := hex.EncodeToString(hash[:])
+
+		fmt.Println(hexHash)
+
+		var compressedBytes bytes.Buffer
+		w := zlib.NewWriter(&compressedBytes)
+		w.Write(content)
+		w.Close()
+
+		writeDir := ".git/objects/" + hexHash[:2]
+		if err := os.MkdirAll(writeDir, 0755); err != nil {
+			log.Fatalf("Error creating directory: %s\n", err)
+		}
+
+		if err := os.WriteFile(writeDir+"/"+hexHash[2:], compressedBytes.Bytes(), 0644); err != nil {
+			log.Fatalf("Error writing file: %s\n", err)
+		}
 
 	default:
 		log.Fatalf("Unknown command %s\n", command)
