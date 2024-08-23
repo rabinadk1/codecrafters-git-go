@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"compress/zlib"
-	"crypto/sha1"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -14,28 +13,6 @@ import (
 	"strconv"
 	"strings"
 )
-
-func loadAndDecompressObject(gitDir, hash string) []byte {
-	path := fmt.Sprintf("%v/.git/objects/%v/%v", gitDir, hash[:2], hash[2:])
-
-	fp, err := os.Open(path)
-	if err != nil {
-		fmt.Printf("Error opening file: %s\n", err)
-		return nil
-	}
-
-	z, err := zlib.NewReader(fp)
-	if err != nil {
-		log.Fatalf("Error decompressing file: %s\n", err)
-	}
-	defer z.Close()
-
-	p, err := io.ReadAll(z)
-	if err != nil {
-		log.Fatalf("Error reading decompressed reader: %s\n", err)
-	}
-	return p
-}
 
 func parseTree(treeData []byte, rootDir string, gitDir string) {
 	// fmt.Printf("Creating directory: %v\n", rootDir)
@@ -70,12 +47,12 @@ func parseTree(treeData []byte, rootDir string, gitDir string) {
 
 		if fileMode == "40000" {
 			// tree
-			subTreeData := loadAndDecompressObject(gitDir, hexHash)
+			subTreeData := loadAndDecompressObject(hexHash, gitDir)
 
 			parseTree(subTreeData, rootDir+"/"+fileName, gitDir)
 		} else if fileMode[0] == '1' {
 			// file or link
-			blobData := loadAndDecompressObject(gitDir, hexHash)
+			blobData := loadAndDecompressObject(hexHash, gitDir)
 
 			nullIndex := bytes.IndexByte(blobData, 0)
 
@@ -98,28 +75,6 @@ func parseTree(treeData []byte, rootDir string, gitDir string) {
 		treeData = treeData[hashEndIndex:]
 
 	}
-}
-
-func hashAndSaveObjects(content []byte, rootDir string) string {
-	hash := sha1.Sum(content)
-	hexHash := hex.EncodeToString(hash[:])
-
-	fmt.Println(hexHash)
-
-	var compressedBytes bytes.Buffer
-	w := zlib.NewWriter(&compressedBytes)
-	w.Write(content)
-	w.Close()
-
-	writeDir := rootDir + "/.git/objects/" + hexHash[:2]
-	if err := os.MkdirAll(writeDir, 0755); err != nil {
-		log.Fatalf("Error creating directory: %s\n", err)
-	}
-
-	if err := os.WriteFile(writeDir+"/"+hexHash[2:], compressedBytes.Bytes(), 0644); err != nil {
-		log.Fatalf("Error writing file: %s\n", err)
-	}
-	return hexHash
 }
 
 const (
@@ -153,8 +108,7 @@ func readSizeEncoding(packData []byte, offset uint32) (uint32, uint32) {
 const (
 	COPY_OFFSET_BYTES = 4
 	COPY_SIZE_BYTES   = 3
-
-	COPY_ZERO_SIZE = 0x10000
+	COPY_ZERO_SIZE    = 0x10000
 )
 
 func readPartialInt(deltaContent []byte, offset *uint32, bytes byte, presentBytes *byte) uint32 {
@@ -359,7 +313,7 @@ func parsePackObject(packData []byte, offset uint32, outputDir string) (byte, []
 		hexHash = hashAndSaveObjects(content, outputDir)
 
 	case OBJ_REF_DELTA:
-		baseObjectContent := loadAndDecompressObject(outputDir, baseObjectHash)
+		baseObjectContent := loadAndDecompressObject(baseObjectHash, outputDir)
 
 		if baseObjectContent == nil {
 			break
@@ -395,10 +349,6 @@ func parsePackObject(packData []byte, offset uint32, outputDir string) (byte, []
 
 		content := append(prefix, objectContent...)
 
-		hash := sha1.Sum(objectContent)
-		hexHash := hex.EncodeToString(hash[:])
-		fmt.Printf("Raw Hash: %s\n", hexHash)
-
 		hexHash = hashAndSaveObjects(content, outputDir)
 
 	case OBJ_TAG:
@@ -422,12 +372,6 @@ func myclone() {
 		log.Fatalf("Error creating directory: %s\n", err)
 	}
 
-	for _, dir := range []string{".git", ".git/objects", ".git/refs"} {
-		if err := os.MkdirAll(outputDir+"/"+dir, 0755); err != nil {
-			log.Fatalf("Error creating directory: %s\n", err)
-		}
-	}
-
 	fetchUrl := url + "/info/refs?service=git-upload-pack"
 	res, err := http.Get(fetchUrl)
 	if err != nil {
@@ -448,10 +392,7 @@ func myclone() {
 	firstObjectHash, ref := lastLineParts[0], lastLineParts[1]
 	firstObjectHash = firstObjectHash[4:]
 
-	headFileContents := []byte(fmt.Sprintf("ref: %v\n", ref))
-	if err := os.WriteFile(outputDir+"/.git/HEAD", headFileContents, 0644); err != nil {
-		log.Fatalf("Error writing file: %s\n", err)
-	}
+	createGitDirs(outputDir, ref)
 
 	body := fmt.Sprintf("0032want %s\n00000009done\n", firstObjectHash)
 	// fmt.Println(body)
@@ -504,7 +445,7 @@ func myclone() {
 		offset = newOffset
 	}
 
-	treeData := loadAndDecompressObject(outputDir, rootTreeHash)
+	treeData := loadAndDecompressObject(rootTreeHash, outputDir)
 
 	// fmt.Println(string(treeData))
 

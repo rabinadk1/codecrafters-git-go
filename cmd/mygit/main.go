@@ -2,11 +2,7 @@ package main
 
 import (
 	"bytes"
-	"compress/zlib"
-	"crypto/sha1"
-	"encoding/hex"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"strings"
@@ -20,16 +16,7 @@ func main() {
 
 	switch command := os.Args[1]; command {
 	case "init":
-		for _, dir := range []string{".git", ".git/objects", ".git/refs"} {
-			if err := os.MkdirAll(dir, 0755); err != nil {
-				log.Fatalf("Error creating directory: %s\n", err)
-			}
-		}
-
-		headFileContents := []byte("ref: refs/heads/main\n")
-		if err := os.WriteFile(".git/HEAD", headFileContents, 0644); err != nil {
-			log.Fatalf("Error writing file: %s\n", err)
-		}
+		createGitDirs(".", "refs/heads/main")
 
 		fmt.Println("Initialized git directory")
 
@@ -38,25 +25,9 @@ func main() {
 			log.Fatalln("usage: mygit cat-file <type> <object>")
 		}
 
-		sha := os.Args[3]
-		path := fmt.Sprintf(".git/objects/%v/%v", sha[:2], sha[2:])
-		compressedReader, err := os.Open(path)
-		if err != nil {
-			log.Fatalf("Error reading file: %s\n", err)
-		}
-		defer compressedReader.Close()
+		hexHash := os.Args[3]
 
-		z, err := zlib.NewReader(compressedReader)
-		if err != nil {
-			log.Fatalf("Error decompressing file: %s\n", err)
-		}
-
-		defer z.Close()
-
-		p, err := io.ReadAll(z)
-		if err != nil {
-			log.Fatalf("Error reading decompressed reader: %s\n", err)
-		}
+		p := loadAndDecompressObject(hexHash, ".")
 
 		parts := strings.Split(string(p), "\x00")
 		fmt.Print(parts[1])
@@ -82,32 +53,16 @@ func main() {
 			filepath = thirdArg
 		}
 
-		hashObject(filepath, writeObject, true)
+		writeBlob(filepath, writeObject, true)
 
 	case "ls-tree":
 		if len(os.Args) != 4 {
 			log.Fatalln("usage: mygit ls-tree --name-only <tree_sha>")
 		}
 
-		sha := os.Args[3]
-		path := fmt.Sprintf(".git/objects/%v/%v", sha[:2], sha[2:])
+		hexHash := os.Args[3]
 
-		compressedReader, err := os.Open(path)
-		if err != nil {
-			log.Fatalf("Error reading file: %s\n", err)
-		}
-		defer compressedReader.Close()
-
-		z, err := zlib.NewReader(compressedReader)
-		if err != nil {
-			log.Fatalf("Error decompressing file: %s\n", err)
-		}
-		defer z.Close()
-
-		p, err := io.ReadAll(z)
-		if err != nil {
-			log.Fatalf("Error reading decompressed reader: %s\n", err)
-		}
+		p := loadAndDecompressObject(hexHash, ".")
 
 		parts := strings.Split(string(p), "\x00")
 
@@ -162,23 +117,11 @@ func main() {
 		size := len(content)
 		content = append([]byte(fmt.Sprintf("commit %d\x00", size)), content...)
 
-		hash := sha1.Sum(content)
-		hexHash := hex.EncodeToString(hash[:])
+		_, hexHash := getHexHash(content)
 
 		fmt.Println(hexHash)
-		var compressedBytes bytes.Buffer
-		w := zlib.NewWriter(&compressedBytes)
-		w.Write(content)
-		w.Close()
 
-		writeDir := ".git/objects/" + hexHash[:2]
-		if err := os.MkdirAll(writeDir, 0755); err != nil {
-			log.Fatalf("Error creating directory: %s\n", err)
-		}
-
-		if err := os.WriteFile(writeDir+"/"+hexHash[2:], compressedBytes.Bytes(), 0644); err != nil {
-			log.Fatalf("Error writing file: %s\n", err)
-		}
+		writeCompressedObject(content, hexHash, ".")
 
 	case "clone":
 		if len(os.Args) < 4 {
