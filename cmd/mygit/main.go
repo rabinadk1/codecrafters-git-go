@@ -16,7 +16,10 @@ func main() {
 
 	switch command := os.Args[1]; command {
 	case "init":
-		createGitDirs(".", "refs/heads/main")
+		err := createGitDirs(".", "refs/heads/main")
+		if err != nil {
+			log.Fatalln("Error creating git dirs: ", err)
+		}
 
 		fmt.Println("Initialized git directory")
 
@@ -27,7 +30,10 @@ func main() {
 
 		hexHash := os.Args[3]
 
-		p := loadAndDecompressObject(hexHash, ".")
+		p, err := loadAndDecompressObject(hexHash, ".")
+		if err != nil {
+			log.Fatalln("Error loading and decompressing object: ", err)
+		}
 
 		parts := strings.Split(string(p), "\x00")
 		fmt.Print(parts[1])
@@ -53,7 +59,10 @@ func main() {
 			filepath = thirdArg
 		}
 
-		writeBlob(filepath, writeObject, true)
+		_, err := writeBlob(filepath, writeObject, true)
+		if err != nil {
+			log.Fatalln("Error writing blob: ", err)
+		}
 
 	case "ls-tree":
 		if len(os.Args) != 4 {
@@ -62,7 +71,10 @@ func main() {
 
 		hexHash := os.Args[3]
 
-		p := loadAndDecompressObject(hexHash, ".")
+		p, err := loadAndDecompressObject(hexHash, ".")
+		if err != nil {
+			log.Fatalln("Error loading and decompressing object: ", err)
+		}
 
 		parts := strings.Split(string(p), "\x00")
 
@@ -76,7 +88,10 @@ func main() {
 		}
 
 	case "write-tree":
-		writeTree(".", true)
+		_, err := writeTree(".", true)
+		if err != nil {
+			log.Fatalln("Error writing tree: ", err)
+		}
 
 	case "commit-tree":
 		if len(os.Args) < 5 {
@@ -121,14 +136,20 @@ func main() {
 
 		fmt.Println(hexHash)
 
-		writeCompressedObject(content, hexHash, ".")
+		err := writeCompressedObject(content, hexHash, ".")
+		if err != nil {
+			log.Fatalln("Error writing compressed object: ", err)
+		}
 
 	case "clone":
 		if len(os.Args) < 4 {
 			log.Fatalln("usage: mygit clone <url> <some_dir>")
 		}
 
-		myclone()
+		err := myclone(os.Args)
+		if err != nil {
+			log.Fatalln("Error cloning: ", err)
+		}
 
 	default:
 		log.Fatalf("Unknown command %s\n", command)

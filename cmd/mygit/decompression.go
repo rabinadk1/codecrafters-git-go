@@ -2,31 +2,36 @@ package main
 
 import (
 	"compress/zlib"
+	"fmt"
 	"io"
-	"log"
 )
 
-func loadAndDecompressObject(hexHash, gitDir string) []byte {
-	compressedReader := getCompressedObjectReader(hexHash, gitDir)
-
-	p := getDecompressedObject(compressedReader)
-	compressedReader.Close()
-
-	return p
-}
-
-func getDecompressedObject(compressedReader io.Reader) []byte {
+func getDecompressedObject(compressedReader io.Reader) ([]byte, error) {
 	z, err := zlib.NewReader(compressedReader)
 	if err != nil {
-		log.Fatalf("Error decompressing file: %s\n", err)
+		return nil, fmt.Errorf("Error decompressing file: %s\n", err)
 	}
-
 	defer z.Close()
 
 	uncompressedObject, err := io.ReadAll(z)
 	if err != nil {
-		log.Fatalf("Error reading decompressed reader: %s\n", err)
+		return nil, fmt.Errorf("Error reading decompressed reader: %s\n", err)
 	}
 
-	return uncompressedObject
+	return uncompressedObject, nil
+}
+
+func loadAndDecompressObject(hexHash, gitDir string) ([]byte, error) {
+	compressedReader, err := getCompressedObjectReader(hexHash, gitDir)
+	if err != nil {
+		return nil, fmt.Errorf("Error loading object: %s\n", err)
+	}
+	defer compressedReader.Close()
+
+	decompressedObj, err := getDecompressedObject(compressedReader)
+	if err != nil {
+		return nil, fmt.Errorf("Error decompressing object: %s\n", err)
+	}
+
+	return decompressedObj, nil
 }

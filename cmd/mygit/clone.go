@@ -2,11 +2,9 @@ package main
 
 import (
 	"bytes"
-	"compress/zlib"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -14,67 +12,10 @@ import (
 	"strings"
 )
 
-func parseTree(treeData []byte, rootDir string, gitDir string) {
-	// fmt.Printf("Creating directory: %v\n", rootDir)
-	err := os.MkdirAll(rootDir, 0755)
-	if err != nil {
-		log.Fatalf("Error creating directory: %s\n", err)
-	}
-
-	// Skip initial tree<size>\0 prefix
-	nullIndex := bytes.IndexByte(treeData, 0)
-	treeData = treeData[nullIndex+1:]
-
-	for len(treeData) > 0 {
-		nullIndex = bytes.IndexByte(treeData, 0)
-
-		fileInfo := string(treeData[:nullIndex])
-
-		parts := strings.SplitN(fileInfo, " ", 2)
-
-		if len(parts) != 2 {
-			log.Fatalf("Malformed tree data: %s\n", fileInfo)
-		}
-
-		fileMode, fileName := parts[0], parts[1]
-
-		// fmt.Println(fileMode, fileName)
-
-		hashEndIndex := nullIndex + 21
-		fileHash := treeData[nullIndex+1 : hashEndIndex]
-
-		hexHash := hex.EncodeToString(fileHash)
-
-		if fileMode == "40000" {
-			// tree
-			subTreeData := loadAndDecompressObject(hexHash, gitDir)
-
-			parseTree(subTreeData, rootDir+"/"+fileName, gitDir)
-		} else if fileMode[0] == '1' {
-			// file or link
-			blobData := loadAndDecompressObject(hexHash, gitDir)
-
-			nullIndex := bytes.IndexByte(blobData, 0)
-
-			fileContent := blobData[nullIndex+1:]
-
-			outputFilePath := rootDir + "/" + fileName
-
-			filePerms, err := strconv.ParseInt(fileMode[len(fileMode)-3:], 8, 0)
-			if err != nil {
-				log.Fatalf("Error parsing file mode: %s\n", err)
-			}
-
-			if err := os.WriteFile(outputFilePath, fileContent, os.FileMode(filePerms)); err != nil {
-				log.Fatalf("Error writing file: %s\n", err)
-			}
-		} else {
-			log.Fatalln("Saving is not curretly implemented for symbolic links.")
-		}
-
-		treeData = treeData[hashEndIndex:]
-
-	}
+type PackObject struct {
+	HexHash string
+	Content []byte
+	Type    byte
 }
 
 const (
@@ -86,30 +27,30 @@ const (
 	OBJ_REF_DELTA = 7
 )
 
-func readSizeEncoding(packData []byte, offset uint32) (uint32, uint32) {
-	const varIntEncodingBits = 7
-
-	var size uint32
-	var shift uint32
-	for {
-		num := packData[offset]
-		offset++
-
-		size |= uint32(num&127) << shift
-
-		if num < 128 {
-			return size, offset
-		}
-
-		shift += varIntEncodingBits
-	}
-}
-
 const (
 	COPY_OFFSET_BYTES = 4
 	COPY_SIZE_BYTES   = 3
 	COPY_ZERO_SIZE    = 0x10000
 )
+
+func readSizeEncoding(packData []byte, offset *uint32) uint32 {
+	const varIntEncodingBits = 7
+
+	var size uint32
+	var shift uint32
+	for {
+		num := packData[*offset]
+		*offset++
+
+		size |= uint32(num&127) << shift
+
+		if num < 128 {
+			return size
+		}
+
+		shift += varIntEncodingBits
+	}
+}
 
 func readPartialInt(deltaContent []byte, offset *uint32, bytes byte, presentBytes *byte) uint32 {
 	var value uint32
@@ -128,17 +69,17 @@ func readPartialInt(deltaContent []byte, offset *uint32, bytes byte, presentByte
 	return value
 }
 
-func applyDelta(deltaContent []byte, baseObjectContent []byte) []byte {
+func applyDelta(deltaContent []byte, baseObjectContent []byte) ([]byte, error) {
 	var offset uint32
 
-	baseSize, offset := readSizeEncoding(deltaContent, offset)
+	baseSize := readSizeEncoding(deltaContent, &offset)
 	// fmt.Printf("Offset after baseSize: %v/%v\n", offset, len(deltaContent))
 
 	if int(baseSize) != len(baseObjectContent) {
-		log.Fatalf("Incorrect base length. delta: %v, base: %v\n", baseSize, len(baseObjectContent))
+		return nil, fmt.Errorf("Incorrect base length. delta: %v, base: %v\n", baseSize, len(baseObjectContent))
 	}
 
-	resultSize, offset := readSizeEncoding(deltaContent, offset)
+	resultSize := readSizeEncoding(deltaContent, &offset)
 
 	var result []byte
 
@@ -169,7 +110,7 @@ func applyDelta(deltaContent []byte, baseObjectContent []byte) []byte {
 		} else {
 			// Data instruction
 			if instruction == 0 {
-				log.Fatalf("Invalid data instruction: %v", instruction)
+				return nil, fmt.Errorf("Invalid data instruction: %v", instruction)
 			}
 
 			deltaOffset := uint32(instruction)
@@ -183,13 +124,13 @@ func applyDelta(deltaContent []byte, baseObjectContent []byte) []byte {
 	// fmt.Printf("Result: %s\n", result)
 
 	if resultSize != uint32(len(result)) {
-		log.Fatalf("Incorrect result length. Read: %v, Computed: %v\n", resultSize, len(result))
+		return nil, fmt.Errorf("Incorrect result length. Read: %v, Computed: %v\n", resultSize, len(result))
 	}
 
-	return result
+	return result, nil
 }
 
-func parsePackObject(packData []byte, offset uint32, outputDir string) (byte, []byte, string, uint32) {
+func parsePackObject(packData []byte, offset *uint32, outputDir string) (*PackObject, error) {
 	objectTypeMapper := map[byte]string{
 		1: "commit",
 		2: "tree",
@@ -199,8 +140,8 @@ func parsePackObject(packData []byte, offset uint32, outputDir string) (byte, []
 		7: "ref_delta",
 	}
 
-	num := packData[offset]
-	offset++
+	num := packData[*offset]
+	*offset++
 
 	objType := (num >> 4) & 7
 	fmt.Printf("Object Type: %v\n", objectTypeMapper[objType])
@@ -210,8 +151,8 @@ func parsePackObject(packData []byte, offset uint32, outputDir string) (byte, []
 
 	// fmt.Printf("num: %d, size: %d (%b)\n", num, size, size)
 	for num > 128 {
-		num = packData[offset]
-		offset++
+		num = packData[*offset]
+		*offset++
 		size |= uint32(num&127) << shift
 		shift += 7
 	}
@@ -225,8 +166,8 @@ func parsePackObject(packData []byte, offset uint32, outputDir string) (byte, []
 
 		var deltaOffset uint32
 		for {
-			num := packData[offset]
-			offset++
+			num := packData[*offset]
+			*offset++
 
 			deltaOffset = (deltaOffset << 7) | (uint32(num & 127))
 
@@ -239,39 +180,33 @@ func parsePackObject(packData []byte, offset uint32, outputDir string) (byte, []
 
 		fmt.Printf("Delta offset: %d", deltaOffset)
 
-		baseObjectOffset = offset - deltaOffset
+		baseObjectOffset = *offset - deltaOffset
 
 		if baseObjectOffset < 12 {
-			log.Fatalf("Invalid base object offset: %d", baseObjectOffset)
+			return nil, fmt.Errorf("Invalid base object offset: %d", baseObjectOffset)
 		}
 
 	case OBJ_REF_DELTA:
 		const hashLength = 20
-		baseObjectHash = hex.EncodeToString(packData[offset : offset+hashLength])
-		offset += hashLength
+		baseObjectHash = hex.EncodeToString(packData[*offset : *offset+hashLength])
+		*offset += hashLength
 
 		fmt.Printf("Referring hash %v\n", baseObjectHash)
 	}
 
-	br := bytes.NewReader(packData[offset:])
+	br := bytes.NewReader(packData[*offset:])
 
 	// fmt.Printf("Attempting to decompress data starting with bytes: %x\n", packData[offset:offset+2])
 
-	z, err := zlib.NewReader(br)
+	objectContent, err := getDecompressedObject(br)
 	if err != nil {
-		log.Fatalf("Error decompressing file: %s\n", err)
-	}
-	defer z.Close()
-
-	objectContent, err := io.ReadAll(z)
-	if err != nil {
-		log.Fatalf("Error reading decompressed reader: %s\n", err)
+		return nil, fmt.Errorf("Error getting decompressed object: %s\n", err)
 	}
 
 	decompressedSize := uint32(len(objectContent))
 
 	if size != decompressedSize {
-		log.Fatalf("Decompressed size %d does not match expected size %d", decompressedSize, size)
+		return nil, fmt.Errorf("Decompressed size %d does not match expected size %d", decompressedSize, size)
 	}
 
 	var hexHash string
@@ -280,40 +215,59 @@ func parsePackObject(packData []byte, offset uint32, outputDir string) (byte, []
 		prefix := []byte(fmt.Sprintf("blob %d\x00", size))
 		content := append(prefix, objectContent...)
 
-		hexHash = hashAndSaveObjects(content, outputDir)
+		hexHash, err = hashAndSaveObjects(content, outputDir)
+		if err != nil {
+			return nil, fmt.Errorf("Error hashing and saving objects: %s\n", err)
+		}
 
 	case OBJ_TREE:
 		prefix := []byte(fmt.Sprintf("tree %d\x00", size))
 		content := append(prefix, objectContent...)
 
-		hexHash = hashAndSaveObjects(content, outputDir)
+		hexHash, err = hashAndSaveObjects(content, outputDir)
+		if err != nil {
+			return nil, fmt.Errorf("Error hashing and saving objects: %s\n", err)
+		}
 
 	case OBJ_COMMIT:
 		prefix := []byte(fmt.Sprintf("commit %d\x00", size))
 		content := append(prefix, objectContent...)
 
-		hexHash = hashAndSaveObjects(content, outputDir)
+		hexHash, err = hashAndSaveObjects(content, outputDir)
+		if err != nil {
+			return nil, fmt.Errorf("Error hashing and saving objects: %s\n", err)
+		}
 
 	case OBJ_OFS_DELTA:
-		baseObjType, baseObjectContent, _, _ := parsePackObject(packData, baseObjectOffset, outputDir)
+		baseObj, err := parsePackObject(packData, &baseObjectOffset, outputDir)
 
 		// fmt.Printf("Base object type: %v\n", baseObjType)
 		// fmt.Printf("Base object content: %s\n", baseObjectContent)
 		// fmt.Printf("Base Hex Hash: %v\n", baseHexHash)
 		// fmt.Printf("Base Remaining: %v\n", newBaseOffset)
 
-		result := applyDelta(objectContent, baseObjectContent)
+		result, err := applyDelta(objectContent, baseObj.Content)
+		if err != nil {
+			return nil, fmt.Errorf("Error applying delta: %s\n", err)
+		}
+
 		// fmt.Printf("Result: %s", result)
 
 		size := len(result)
-		prefix := []byte(fmt.Sprintf("%v %d\x00", objectTypeMapper[baseObjType], size))
+		prefix := []byte(fmt.Sprintf("%v %d\x00", objectTypeMapper[baseObj.Type], size))
 		fmt.Printf("Prefix: %s", prefix)
 		content := append(prefix, objectContent...)
 
-		hexHash = hashAndSaveObjects(content, outputDir)
+		hexHash, err = hashAndSaveObjects(content, outputDir)
+		if err != nil {
+			return nil, fmt.Errorf("Error hashing and saving objects: %s\n", err)
+		}
 
 	case OBJ_REF_DELTA:
-		baseObjectContent := loadAndDecompressObject(baseObjectHash, outputDir)
+		baseObjectContent, err := loadAndDecompressObject(baseObjectHash, outputDir)
+		if err != nil {
+			return nil, fmt.Errorf("Error loading base object content: %s\n", err)
+		}
 
 		if baseObjectContent == nil {
 			break
@@ -332,14 +286,17 @@ func parsePackObject(packData []byte, offset uint32, outputDir string) (byte, []
 		// fmt.Printf("Base object content: %s\n", baseObjectContent)
 		intBaseSize, err := strconv.Atoi(baseSize)
 		if err != nil {
-			log.Fatalf("Error parsing base size: %s", err)
+			return nil, fmt.Errorf("Error parsing base size: %s", err)
 		}
 
 		if intBaseSize != len(baseObjectContent) {
-			log.Fatalf("Calculated base object size %v does not match read size %v", len(baseObjectContent), baseSize)
+			return nil, fmt.Errorf("Calculated base object size %v does not match read size %v", len(baseObjectContent), baseSize)
 		}
 
-		result := applyDelta(objectContent, baseObjectContent)
+		result, err := applyDelta(objectContent, baseObjectContent)
+		if err != nil {
+			return nil, fmt.Errorf("Error applying delta: %s", err)
+		}
 		// fmt.Printf("Result: %s", result)
 
 		size := len(result)
@@ -349,22 +306,26 @@ func parsePackObject(packData []byte, offset uint32, outputDir string) (byte, []
 
 		content := append(prefix, objectContent...)
 
-		hexHash = hashAndSaveObjects(content, outputDir)
-
+		hexHash, err = hashAndSaveObjects(content, outputDir)
+		if err != nil {
+			return nil, fmt.Errorf("Error hashing and saving objects: %s\n", err)
+		}
 	case OBJ_TAG:
 		fmt.Println("Tag object not implemented")
 	}
 
-	compressedSize := uint32(len(packData[offset:]) - br.Len())
+	compressedSize := uint32(len(packData[*offset:]) - br.Len())
 
-	newOffset := offset + compressedSize
+	*offset += compressedSize
 
-	return objType, objectContent, hexHash, newOffset
+	return &PackObject{
+		Content: objectContent, Type: objType, HexHash: hexHash,
+	}, nil
 }
 
-func myclone() {
-	url := strings.TrimSuffix(os.Args[2], "/")
-	outputDir := strings.TrimSuffix(os.Args[3], "/")
+func myclone(args []string) error {
+	url := strings.TrimSuffix(args[2], "/")
+	outputDir := strings.TrimSuffix(args[3], "/")
 
 	fmt.Printf("Downloading from %v to %v...\n", url, outputDir)
 
@@ -372,17 +333,10 @@ func myclone() {
 		log.Fatalf("Error creating directory: %s\n", err)
 	}
 
-	fetchUrl := url + "/info/refs?service=git-upload-pack"
-	res, err := http.Get(fetchUrl)
-	if err != nil {
-		log.Fatalf("Error getting %s: %s\n", fetchUrl, err)
-	}
-
-	defer res.Body.Close()
-	resBody, err := io.ReadAll(res.Body)
-	if err != nil {
-		log.Fatalf("Error reading response body: %s\n", err)
-	}
+	resBody, err := readAllResponse(func() (*http.Response, error) {
+		fetchUrl := url + "/info/refs?service=git-upload-pack"
+		return http.Get(fetchUrl)
+	})
 
 	parts := strings.Split(string(resBody), "\n")
 	lastLine := parts[len(parts)-2]
@@ -394,23 +348,20 @@ func myclone() {
 
 	createGitDirs(outputDir, ref)
 
-	body := fmt.Sprintf("0032want %s\n00000009done\n", firstObjectHash)
-	// fmt.Println(body)
-	fetchUrl = url + "/git-upload-pack"
+	packData, err := readAllResponse(func() (*http.Response, error) {
+		body := fmt.Sprintf("0032want %s\n00000009done\n", firstObjectHash)
+		fetchUrl := url + "/git-upload-pack"
 
-	res, err = http.Post(fetchUrl, "application/x-git-upload-pack-request", strings.NewReader(body))
-	if err != nil {
-		log.Fatalf("Error getting %s: %s\n", fetchUrl, err)
-	}
+		return http.Post(fetchUrl, "application/x-git-upload-pack-request", strings.NewReader(body))
+	})
 
-	defer res.Body.Close()
-	packData, err := io.ReadAll(res.Body)
-	if err != nil {
-		log.Fatalf("Error reading response body: %s\n", err)
-	}
+	checksumIndex := len(packData) - 20
 
-	checksum := hex.EncodeToString(packData[len(packData)-20:])
+	checksum := hex.EncodeToString(packData[checksumIndex:])
 	fmt.Printf("Checksum: %s\n", checksum)
+
+	// Remove checksum
+	packData = packData[:checksumIndex]
 
 	const nackOffset = 8
 	if strings.Contains(string(packData[:nackOffset]), "NAK") {
@@ -419,13 +370,13 @@ func myclone() {
 
 	// Verify pack signature
 	if string(packData[:4]) != "PACK" {
-		log.Fatalln("Invalid pack file signature")
+		return fmt.Errorf("Invalid pack file signature")
 	}
 
 	// Read version
 	version := binary.BigEndian.Uint32(packData[4:8])
 	if version != 2 && version != 3 {
-		log.Fatalf("unsupported pack version: %d", version)
+		return fmt.Errorf("unsupported pack version: %d\n", version)
 	}
 
 	// Read number of objects
@@ -438,17 +389,28 @@ func myclone() {
 
 	for i := 1; i <= int(numObjects); i++ {
 		fmt.Printf("\nProcessing object %d/%d at offset: %v\n", i, numObjects, offset)
-		objType, _, hexHash, newOffset := parsePackObject(packData, offset, outputDir)
-		if objType == OBJ_TREE && rootTreeHash == "" {
-			rootTreeHash = hexHash
+		packObj, err := parsePackObject(packData, &offset, outputDir)
+		if err != nil {
+			return fmt.Errorf("Error parsing pack object: %s", err)
 		}
-		offset = newOffset
+
+		if packObj.Type == OBJ_TREE && rootTreeHash == "" {
+			rootTreeHash = packObj.HexHash
+		}
 	}
 
-	treeData := loadAndDecompressObject(rootTreeHash, outputDir)
+	treeData, err := loadAndDecompressObject(rootTreeHash, outputDir)
+	if err != nil {
+		return fmt.Errorf("Error loading tree data: %s\n", err)
+	}
 
 	// fmt.Println(string(treeData))
 
 	// Save files using the root tree
-	parseTree(treeData, outputDir, outputDir)
+	err = parseTree(treeData, outputDir, outputDir)
+	if err != nil {
+		return fmt.Errorf("Error parsing tree: %s\n", err)
+	}
+
+	return nil
 }
